@@ -54,6 +54,35 @@ func LoadBackend(name, defaultPort string) Backend {
 	return Backend{Name: name, Port: getEnv("PORT", defaultPort)}
 }
 
+// Auth holds JWT configuration. All gateway instances must share JWT_SECRET —
+// a secret that differs between instances will reject valid tokens.
+type Auth struct {
+	JWTSecret string
+	TokenTTL  time.Duration
+}
+
+// LoadAuth reads auth configuration from the environment.
+func LoadAuth() Auth {
+	return Auth{
+		JWTSecret: getEnv("JWT_SECRET", "change-me-in-production"),
+		TokenTTL:  getEnvDuration("JWT_TOKEN_TTL", 24*time.Hour),
+	}
+}
+
+// Security holds IP whitelist and blacklist CIDR ranges.
+type Security struct {
+	IPWhitelist string // comma-separated CIDRs; matching IPs bypass rate limiting
+	IPBlacklist string // comma-separated CIDRs; matching IPs get 403
+}
+
+// LoadSecurity reads IP filter configuration from the environment.
+func LoadSecurity() Security {
+	return Security{
+		IPWhitelist: getEnv("RATE_LIMIT_IP_WHITELIST", ""),
+		IPBlacklist: getEnv("RATE_LIMIT_IP_BLACKLIST", ""),
+	}
+}
+
 // Redis holds connection settings for the shared Redis instance. All gateway
 // instances point at the same Redis so rate-limit state is truly distributed.
 type Redis struct {

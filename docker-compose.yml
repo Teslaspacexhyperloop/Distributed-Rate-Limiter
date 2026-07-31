@@ -13,9 +13,14 @@ services:
       PRODUCT_SERVICE_URL: "http://product-service:8082"
       ORDER_SERVICE_URL: "http://order-service:8083"
       REDIS_ADDR: "redis:6379"
-      # open = allow all requests when Redis is down (availability over safety)
-      # closed = deny all requests when Redis is down (safety over availability)
       RATE_LIMIT_FAILURE_MODE: "open"
+      # All gateway instances must share this secret — a mismatch means tokens
+      # signed by one instance are rejected by the other.
+      JWT_SECRET: "change-me-in-production-use-vault-or-k8s-secrets"
+      JWT_TOKEN_TTL: "24h"
+      # Comma-separated CIDRs. Whitelist skips rate limiting; blacklist gives 403.
+      RATE_LIMIT_IP_WHITELIST: ""
+      RATE_LIMIT_IP_BLACKLIST: ""
     depends_on:
       redis:
         condition: service_healthy
@@ -53,7 +58,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
