@@ -10,16 +10,43 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"distributed-rate-limiter/internal/config"
+	"distributed-rate-limiter/internal/ratelimiter"
 	"distributed-rate-limiter/internal/routing"
 )
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg := config.LoadGateway()
+	redisCfg := config.LoadRedis()
 
-	router, err := routing.NewRouter(cfg, logger)
+	// Build rate limiter backed by Redis. If Redis is unavailable at startup,
+	// log a warning and continue without rate limiting — fail-open at boot so
+	// a Redis outage doesn't prevent the gateway from starting.
+	var rl *ratelimiter.RateLimiter
+	rc, err := ratelimiter.NewRedisClient(
+		context.Background(),
+		redisCfg.Addr,
+		redisCfg.Password,
+		redisCfg.DB,
+		redisCfg.PoolSize,
+	)
+	if err != nil {
+		logger.Warn("Redis unavailable at startup — rate limiting disabled", "error", err)
+	} else {
+		resolver := ratelimiter.NewConfigResolver(rc.Client(), 5*time.Minute)
+		failOpen := redisCfg.FailureMode != "closed"
+		rl = ratelimiter.New(rc, resolver, failOpen)
+		logger.Info("rate limiter ready",
+			"redis_addr", redisCfg.Addr,
+			"failure_mode", redisCfg.FailureMode,
+		)
+		defer rc.Close()
+	}
+
+	router, err := routing.NewRouter(cfg, logger, rl)
 	if err != nil {
 		logger.Error("failed to build router", "error", err)
 		os.Exit(1)

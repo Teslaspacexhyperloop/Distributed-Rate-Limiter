@@ -13,17 +13,23 @@ import (
 	"distributed-rate-limiter/internal/config"
 	custommw "distributed-rate-limiter/internal/middleware"
 	"distributed-rate-limiter/internal/proxy"
+	"distributed-rate-limiter/internal/ratelimiter"
 )
 
 // NewRouter wires the gateway's middleware stack and proxies each /api
 // prefix to its backend service. Routing is static and config-driven — no
 // in-memory state that would break horizontal scaling in Phase 4.
-func NewRouter(cfg config.Gateway, logger *slog.Logger) (http.Handler, error) {
+// rl may be nil, in which case rate limiting is skipped (useful for local dev
+// without Redis).
+func NewRouter(cfg config.Gateway, logger *slog.Logger, rl *ratelimiter.RateLimiter) (http.Handler, error) {
 	r := chi.NewRouter()
 
 	r.Use(custommw.RequestID)
 	r.Use(custommw.Logging(logger))
 	r.Use(chimw.Recoverer)
+	if rl != nil {
+		r.Use(custommw.RateLimit(rl))
+	}
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

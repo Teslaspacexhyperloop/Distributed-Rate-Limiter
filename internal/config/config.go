@@ -7,6 +7,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -53,6 +54,27 @@ func LoadBackend(name, defaultPort string) Backend {
 	return Backend{Name: name, Port: getEnv("PORT", defaultPort)}
 }
 
+// Redis holds connection settings for the shared Redis instance. All gateway
+// instances point at the same Redis so rate-limit state is truly distributed.
+type Redis struct {
+	Addr        string
+	Password    string
+	DB          int
+	PoolSize    int
+	FailureMode string // "open" = allow all on Redis down; "closed" = deny all
+}
+
+// LoadRedis reads Redis configuration from the environment.
+func LoadRedis() Redis {
+	return Redis{
+		Addr:        getEnv("REDIS_ADDR", "localhost:6379"),
+		Password:    getEnv("REDIS_PASSWORD", ""),
+		DB:          getEnvInt("REDIS_DB", 0),
+		PoolSize:    getEnvInt("REDIS_POOL_SIZE", 20),
+		FailureMode: getEnv("RATE_LIMIT_FAILURE_MODE", "open"),
+	}
+}
+
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -70,4 +92,16 @@ func getEnvDuration(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+func getEnvInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return n
 }
