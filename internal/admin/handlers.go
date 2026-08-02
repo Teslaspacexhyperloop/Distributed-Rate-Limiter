@@ -11,6 +11,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"distributed-rate-limiter/internal/ratelimiter"
+	"distributed-rate-limiter/internal/resilience"
 )
 
 // pubsubChannel is the Redis pub/sub channel used to broadcast cache-flush
@@ -24,11 +25,12 @@ const pubsubChannel = "rl:cache-flush"
 type Handler struct {
 	resolver *ratelimiter.ConfigResolver
 	rdb      *redis.Client
+	breakers map[string]*resilience.Breaker
 }
 
-// NewHandler creates an admin Handler.
-func NewHandler(resolver *ratelimiter.ConfigResolver, rdb *redis.Client) *Handler {
-	return &Handler{resolver: resolver, rdb: rdb}
+// NewHandler creates an admin Handler. breakers may be nil.
+func NewHandler(resolver *ratelimiter.ConfigResolver, rdb *redis.Client, breakers map[string]*resilience.Breaker) *Handler {
+	return &Handler{resolver: resolver, rdb: rdb, breakers: breakers}
 }
 
 // ListKeys scans Redis for all active rate-limit counters.
@@ -132,11 +134,18 @@ func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
 	// Redis memory info (human-readable section from INFO memory).
 	memInfo, _ := h.rdb.Info(r.Context(), "memory").Result()
 
+	// Circuit breaker states: "closed" | "half-open" | "open"
+	cbStates := make(map[string]string, len(h.breakers))
+	for name, cb := range h.breakers {
+		cbStates[name] = cb.State().String()
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"rate_limit_keys":        rlKeys,
 		"override_keys":          len(algoDist),
 		"algorithm_distribution": algoDist,
 		"redis_memory":           memInfo,
+		"circuit_breakers":       cbStates,
 	})
 }
 

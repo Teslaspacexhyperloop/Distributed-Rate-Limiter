@@ -2,6 +2,7 @@
 package proxy
 
 import (
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"distributed-rate-limiter/internal/middleware"
+	"distributed-rate-limiter/internal/resilience"
 )
 
 // backendTransport is shared by every backend proxy. Timeouts live here, at
@@ -27,12 +29,20 @@ var backendTransport = &http.Transport{
 	MaxIdleConnsPerHost:   20,
 }
 
-// New builds a reverse proxy for a single backend. It propagates the
-// request's correlation ID to the backend; X-Forwarded-For is populated
-// automatically by httputil.ReverseProxy from the client's RemoteAddr.
-func New(name string, target *url.URL) *httputil.ReverseProxy {
+// New builds a reverse proxy for a single backend. If breaker is non-nil each
+// request is wrapped in a circuit breaker and idempotent methods are retried
+// with exponential backoff + jitter on 502/503/504 responses.
+//
+// breaker is per-backend so a failing product-service does not trip the breaker
+// for user-service or order-service.
+func New(name string, target *url.URL, breaker *resilience.Breaker, policy resilience.Policy) *httputil.ReverseProxy {
 	rp := httputil.NewSingleHostReverseProxy(target)
-	rp.Transport = backendTransport
+
+	if breaker != nil {
+		rp.Transport = resilience.NewTransport(name, backendTransport, breaker, policy)
+	} else {
+		rp.Transport = backendTransport
+	}
 
 	baseDirector := rp.Director
 	rp.Director = func(r *http.Request) {
@@ -41,16 +51,28 @@ func New(name string, target *url.URL) *httputil.ReverseProxy {
 	}
 
 	// The gateway's RequestID middleware already set this header on the
-	// client-facing ResponseWriter before the proxy ran. ReverseProxy copies
-	// backend response headers with Header.Add rather than Set, so without
-	// this the backend's copy of the same header would double up into a
-	// single malformed "id,id" header instead of one value.
+	// client-facing ResponseWriter. ReverseProxy copies backend response
+	// headers with Add (not Set), so without this the header would double up
+	// into a malformed "id,id" value.
 	rp.ModifyResponse = func(res *http.Response) error {
 		res.Header.Del(middleware.RequestIDHeader)
 		return nil
 	}
 
 	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		var cbErr *resilience.ErrCircuitOpen
+		if errors.As(err, &cbErr) {
+			// Circuit is OPEN — the backend is known unhealthy; fail fast.
+			slog.Warn("circuit breaker open, rejecting request",
+				"service", name,
+				"request_id", middleware.FromContext(r.Context()),
+			)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"service temporarily unavailable — circuit breaker open"}`))
+			return
+		}
+
 		slog.Error("backend unavailable",
 			"service", name,
 			"request_id", middleware.FromContext(r.Context()),

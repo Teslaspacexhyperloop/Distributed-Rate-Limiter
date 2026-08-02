@@ -16,6 +16,7 @@ import (
 	authpkg "distributed-rate-limiter/internal/auth"
 	"distributed-rate-limiter/internal/config"
 	"distributed-rate-limiter/internal/ratelimiter"
+	"distributed-rate-limiter/internal/resilience"
 	"distributed-rate-limiter/internal/routing"
 	"distributed-rate-limiter/internal/security"
 )
@@ -60,6 +61,17 @@ func main() {
 	opts.IPFilter = ipFilter
 	opts.AuthCfg = &authCfg
 
+	// One circuit breaker per backend service. Isolation is the key property:
+	// a failing product-service trips only its own breaker, leaving user-service
+	// and order-service unaffected.
+	breakerCfg := resilience.DefaultBreakerConfig()
+	opts.Breakers = map[string]*resilience.Breaker{
+		"user-service":    resilience.NewBreaker("user-service", breakerCfg, logger),
+		"product-service": resilience.NewBreaker("product-service", breakerCfg, logger),
+		"order-service":   resilience.NewBreaker("order-service", breakerCfg, logger),
+	}
+
+
 	if err != nil {
 		logger.Warn("Redis unavailable at startup — rate limiting and auth storage disabled", "error", err)
 	} else {
@@ -70,7 +82,7 @@ func main() {
 
 		opts.RateLimiter = ratelimiter.New(rc, resolver, failOpen)
 		opts.AuthHandler = authpkg.NewHandler(rc.Client(), authCfg.JWTSecret, authCfg.TokenTTL)
-		opts.AdminHandler = admin.NewHandler(resolver, rc.Client())
+		opts.AdminHandler = admin.NewHandler(resolver, rc.Client(), opts.Breakers)
 
 		// Subscribe to the cache-flush pub/sub channel. When any gateway instance
 		// calls POST /admin/config/reload or PUT /admin/limits/*, it publishes here

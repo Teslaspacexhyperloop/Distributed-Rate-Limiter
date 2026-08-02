@@ -16,11 +16,12 @@ import (
 	custommw "distributed-rate-limiter/internal/middleware"
 	"distributed-rate-limiter/internal/proxy"
 	"distributed-rate-limiter/internal/ratelimiter"
+	"distributed-rate-limiter/internal/resilience"
 	"distributed-rate-limiter/internal/security"
 )
 
-// Options carries optional Phase 2+ components. Fields may be nil — the router
-// degrades gracefully (no rate limiting without rl, no auth without authCfg, etc.).
+// Options carries optional components. Fields may be nil — the router degrades
+// gracefully (e.g. no rate limiting without RateLimiter).
 type Options struct {
 	GatewayID    string // emitted as X-Gateway-Id response header for instance identification
 	RateLimiter  *ratelimiter.RateLimiter
@@ -28,6 +29,9 @@ type Options struct {
 	IPFilter     *security.IPFilter
 	AuthHandler  *auth.Handler
 	AdminHandler *admin.Handler
+	// Breakers holds one circuit breaker per backend service (keyed by name).
+	// When set, each proxy is wrapped with circuit breaking and retry.
+	Breakers map[string]*resilience.Breaker
 }
 
 // NewRouter wires the gateway's middleware stack and proxies each /api prefix
@@ -101,12 +105,18 @@ func NewRouter(cfg config.Gateway, logger *slog.Logger, opts Options) (http.Hand
 		{"/api/orders", cfg.OrderServiceURL, "order-service"},
 	}
 
+	retryPolicy := resilience.DefaultPolicy()
+
 	for _, b := range backends {
 		target, err := url.Parse(b.target)
 		if err != nil {
 			return nil, fmt.Errorf("parsing %s url %q: %w", b.name, b.target, err)
 		}
-		p := proxy.New(b.name, target)
+		var breaker *resilience.Breaker
+		if opts.Breakers != nil {
+			breaker = opts.Breakers[b.name]
+		}
+		p := proxy.New(b.name, target, breaker, retryPolicy)
 		r.Handle(b.prefix, p)
 		r.Handle(b.prefix+"/*", p)
 	}
