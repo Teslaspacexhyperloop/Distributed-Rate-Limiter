@@ -21,7 +21,15 @@ import (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	// GATEWAY_ID distinguishes instances in logs and response headers.
+	// Falls back to hostname so local runs without Docker still have an ID.
+	gatewayID := os.Getenv("GATEWAY_ID")
+	if gatewayID == "" {
+		if h, err := os.Hostname(); err == nil {
+			gatewayID = h
+		}
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("gateway_id", gatewayID)
 
 	cfg := config.LoadGateway()
 	redisCfg := config.LoadRedis()
@@ -48,6 +56,7 @@ func main() {
 	)
 
 	var opts routing.Options
+	opts.GatewayID = gatewayID
 	opts.IPFilter = ipFilter
 	opts.AuthCfg = &authCfg
 

@@ -22,6 +22,7 @@ import (
 // Options carries optional Phase 2+ components. Fields may be nil — the router
 // degrades gracefully (no rate limiting without rl, no auth without authCfg, etc.).
 type Options struct {
+	GatewayID    string // emitted as X-Gateway-Id response header for instance identification
 	RateLimiter  *ratelimiter.RateLimiter
 	AuthCfg      *config.Auth
 	IPFilter     *security.IPFilter
@@ -31,14 +32,27 @@ type Options struct {
 
 // NewRouter wires the gateway's middleware stack and proxies each /api prefix
 // to its backend service. The middleware order is:
-//  1. RequestID  — correlation ID for every hop
-//  2. Logging    — structured JSON per request
-//  3. Recoverer  — panic → 500
-//  4. IPFilter   — blacklist → 403; whitelist → mark in context
-//  5. JWT auth   — optional; sets claims in context
-//  6. RateLimit  — uses claims + whitelist flag from context
+//  1. GatewayID  — set X-Gateway-Id response header (Phase 4)
+//  2. RequestID  — correlation ID for every hop
+//  3. Logging    — structured JSON per request
+//  4. Recoverer  — panic → 500
+//  5. IPFilter   — blacklist → 403; whitelist → mark in context
+//  6. JWT auth   — optional; sets claims in context
+//  7. RateLimit  — uses claims + whitelist flag from context
 func NewRouter(cfg config.Gateway, logger *slog.Logger, opts Options) (http.Handler, error) {
 	r := chi.NewRouter()
+
+	// Stamp every response with the instance ID so load-balancer tests and
+	// Grafana dashboards can track which gateway handled each request.
+	if opts.GatewayID != "" {
+		gid := opts.GatewayID
+		r.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("X-Gateway-Id", gid)
+				next.ServeHTTP(w, r)
+			})
+		})
+	}
 
 	r.Use(custommw.RequestID)
 	r.Use(custommw.Logging(logger))

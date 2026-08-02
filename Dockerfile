@@ -8,6 +8,9 @@ COPY . .
 ARG SERVICE
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/service ./cmd/${SERVICE}
 
-FROM gcr.io/distroless/static-debian12:nonroot
+# alpine provides wget for Docker healthchecks while staying small (~8 MB).
+# The Go binary is statically linked (CGO_ENABLED=0) so it runs without glibc.
+FROM alpine:3.20
+RUN apk add --no-cache wget
 COPY --from=builder /out/service /service
 ENTRYPOINT ["/service"]

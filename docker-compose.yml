@@ -1,35 +1,72 @@
+x-gateway: &gateway
+  build:
+    context: .
+    args:
+      SERVICE: gateway
+  environment: &gateway-env
+    GATEWAY_PORT: "8080"
+    USER_SERVICE_URL:        "http://user-service:8081"
+    PRODUCT_SERVICE_URL:     "http://product-service:8082"
+    ORDER_SERVICE_URL:       "http://order-service:8083"
+    REDIS_ADDR:              "redis:6379"
+    RATE_LIMIT_FAILURE_MODE: "open"
+    # All gateway instances must share this secret — a mismatch means tokens
+    # signed by one instance are rejected by the other.
+    JWT_SECRET:    "change-me-in-production-use-vault-or-k8s-secrets"
+    JWT_TOKEN_TTL: "24h"
+    # Comma-separated CIDRs. Whitelist skips rate limiting; blacklist gives 403.
+    RATE_LIMIT_IP_WHITELIST: ""
+    RATE_LIMIT_IP_BLACKLIST: ""
+  depends_on:
+    redis:
+      condition: service_healthy
+    user-service:
+      condition: service_started
+    product-service:
+      condition: service_started
+    order-service:
+      condition: service_started
+  healthcheck:
+    test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/healthz || exit 1"]
+    interval: 5s
+    timeout: 3s
+    retries: 5
+    start_period: 5s
+
 services:
-  gateway:
-    build:
-      context: .
-      args:
-        SERVICE: gateway
+  # Two identical gateway instances share one Redis. This is the distributed
+  # systems proof: 60 requests to gateway1 + 40 to gateway2 = 429 on request 101.
+  gateway1:
+    <<: *gateway
     ports:
-      # Host 8080 is already in use on this machine.
-      - "8090:8080"
+      - "8091:8080"   # direct access for integration tests and admin API
     environment:
-      GATEWAY_PORT: "8080"
-      USER_SERVICE_URL: "http://user-service:8081"
-      PRODUCT_SERVICE_URL: "http://product-service:8082"
-      ORDER_SERVICE_URL: "http://order-service:8083"
-      REDIS_ADDR: "redis:6379"
-      RATE_LIMIT_FAILURE_MODE: "open"
-      # All gateway instances must share this secret — a mismatch means tokens
-      # signed by one instance are rejected by the other.
-      JWT_SECRET: "change-me-in-production-use-vault-or-k8s-secrets"
-      JWT_TOKEN_TTL: "24h"
-      # Comma-separated CIDRs. Whitelist skips rate limiting; blacklist gives 403.
-      RATE_LIMIT_IP_WHITELIST: ""
-      RATE_LIMIT_IP_BLACKLIST: ""
+      <<: *gateway-env
+      GATEWAY_ID: "gateway1"
+
+  gateway2:
+    <<: *gateway
+    ports:
+      - "8092:8080"   # direct access for integration tests and admin API
+    environment:
+      <<: *gateway-env
+      GATEWAY_ID: "gateway2"
+
+  # NGINX distributes traffic round-robin. Clients hit :8090 (the public port).
+  # Admin endpoints are blocked at this layer — use :8091/:8092 directly.
+  # depends_on: service_healthy ensures gateways are DNS-registered before
+  # NGINX resolves their names in the upstream block.
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "8090:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
-      redis:
+      gateway1:
         condition: service_healthy
-      user-service:
-        condition: service_started
-      product-service:
-        condition: service_started
-      order-service:
-        condition: service_started
+      gateway2:
+        condition: service_healthy
 
   user-service:
     build:
@@ -58,7 +95,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6380:6379"
+      - "6380:6379"   # host port 6380 — avoids conflict with other Redis instances
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
